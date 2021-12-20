@@ -38,6 +38,24 @@
 #define UI_CMD_RIGHT    1
 #define UI_CMD_CENTER   2
 
+// Structs
+typedef struct
+{
+    float fAzimuth;
+    float fElevation;
+} point_direction_t;
+
+// Enums
+typedef enum
+{
+    UI_MENU_MAIN = -1,
+    UI_MENU_BT_DATA = 0,
+    UI_MENU_IMU,
+    UI_MENU_CALIBRATION,
+    UI_MENU_BATTERY,
+    UI_MENU_COUNT
+} ui_menu_t;
+
 // UI Colors
 const uint16_t  Display_Color_Black   = 0x0000;
 const uint16_t  Display_Color_Blue    = 0x001F;
@@ -52,13 +70,21 @@ uint16_t        Display_Text_Color      = Display_Color_Black;
 uint16_t        Display_Backround_Color = Display_Color_Blue;
 uint16_t        Display_Selected_Color  = Display_Color_Yellow;
 
-// Structs
-typedef struct
+// UI Strings
+const char*     Display_Str_Main_Menu[UI_MENU_COUNT] =
 {
-    float fAzimuth;
-    float fElevation;
-} point_direction_t;
+    "Bluetooth",
+    "IMU",
+    "Calib.",
+    "Battery"
+};
 
+const float fIMUCal[12] = {
+    -320.92, -4.72, 806.15,
+    -202.33, 64.51, 219.67,
+    -1996.70, 2202.25, -1419.39,
+    0.83, 1.00, 1.27
+};
 volatile unsigned long ulIdleCycleCount = 0UL;
 SemaphoreHandle_t xI2CMutex;
 SemaphoreHandle_t xIMUIRQCounter;
@@ -67,6 +93,7 @@ QueueHandle_t xSerialPortQueue;
 QueueHandle_t xTargetQueue;
 QueueHandle_t xIMUDataQueue;
 QueueHandle_t xServoQueue;
+QueueHandle_t xBatteryQueue;
 
 bool BTConnected = false;
 
@@ -79,47 +106,146 @@ void IRAM_ATTR vLeftIRQ();
 void IRAM_ATTR vRightIRQ();
 void IRAM_ATTR vCenterIRQ();
 
-void displayUpTime(Adafruit_ST7735 &tft)
+void tftMainMenu(Adafruit_ST7735 &tft, uint8_t sel)
 {
-    unsigned long upSeconds = millis() / 1000;
-    unsigned long days = upSeconds / 86400;
-    upSeconds = upSeconds % 86400;
-    unsigned long hours = upSeconds / 3600;
-    upSeconds = upSeconds % 3600;
-    unsigned long minutes = upSeconds / 60;
-    upSeconds = upSeconds % 60;
-
-    static char oldTimeString[16];
-    char newTimeString[16];
-    
-    snprintf(
-        newTimeString,
-        16,
-        "%lu %02lu:%02lu:%02lu",
-        days, hours, minutes, upSeconds
-    );
-
-    if(strcmp(newTimeString, oldTimeString) != 0)
+    for(uint8_t i = 0; i < UI_MENU_COUNT; i++)
     {
-        tft.setCursor(0, 0);
-        tft.setTextColor(Display_Backround_Color);
-        tft.print(oldTimeString);
-        
-        tft.setCursor(0, 0);
+        tft.fillRect(0, 15 + i * 15, 128, 15, i == sel ? Display_Selected_Color : Display_Backround_Color);
+        tft.setCursor(0, 15 + i * 15);
         tft.setTextColor(Display_Text_Color);
-        tft.print(newTimeString);
-
-        tft.fillRect(0, 15, 128, 15, Display_Selected_Color);
-        tft.setCursor(0, 15);
-        tft.setTextColor(Display_Backround_Color);
-        tft.print(oldTimeString);
-        
-        tft.setCursor(0, 15);
-        tft.setTextColor(Display_Text_Color);
-        tft.print(newTimeString);
-        
-        strcpy(oldTimeString, newTimeString);
+        tft.print(Display_Str_Main_Menu[i]);
     }
+}
+void tftBTMenu(Adafruit_ST7735 &tft)
+{
+    point_direction_t xTargetPosition;
+
+    if(xQueuePeek(xTargetQueue, &xTargetPosition, 0) != pdPASS)
+        return;
+
+    char buf[32];
+
+    snprintf(buf, 32, "Az: %.2f", xTargetPosition.fAzimuth);
+
+    tft.fillRect(0, 30, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 30);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "El: %.2f", xTargetPosition.fElevation);
+
+    tft.fillRect(0, 45, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 45);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+}
+void tftIMUMenu(Adafruit_ST7735 &tft)
+{
+    point_direction_t xCurrentPosition;
+
+    if(xQueuePeek(xIMUDataQueue, &xCurrentPosition, 0) != pdPASS)
+        return;
+
+    char buf[32];
+
+    snprintf(buf, 32, "Az: %.2f", xCurrentPosition.fAzimuth);
+
+    tft.fillRect(0, 15, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 15);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "El: %.2f", xCurrentPosition.fElevation);
+
+    tft.fillRect(0, 30, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 30);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+}
+void tftCalibMenu(Adafruit_ST7735 &tft)
+{
+    char buf[32];
+
+    snprintf(buf, 32, "Ax: %.2f", fIMUCal[0]);
+
+    tft.fillRect(0, 15, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 15);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "Ay: %.2f", fIMUCal[1]);
+
+    tft.fillRect(0, 30, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 30);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "Az: %.2f", fIMUCal[2]);
+
+    tft.fillRect(0, 45, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 45);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+
+    snprintf(buf, 32, "Gx: %.2f", fIMUCal[3]);
+
+    tft.fillRect(0, 60, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 60);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "Gy: %.2f", fIMUCal[4]);
+
+    tft.fillRect(0, 75, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 75);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "Gz: %.2f", fIMUCal[5]);
+
+    tft.fillRect(0, 90, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 90);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+
+    snprintf(buf, 32, "Mx: %.2f", fIMUCal[6]);
+
+    tft.fillRect(0, 105, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 105);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "My: %.2f", fIMUCal[7]);
+
+    tft.fillRect(0, 120, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 120);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+
+    snprintf(buf, 32, "Mz: %.2f", fIMUCal[8]);
+
+    tft.fillRect(0, 135, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 135);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
+}
+void tftBatMenu(Adafruit_ST7735 &tft)
+{
+    float xBattery;
+
+    if(xQueuePeek(xBatteryQueue, &xBattery, 0) != pdPASS)
+        return;
+
+    char buf[32];
+
+    snprintf(buf, 32, "Bat: %.2f V", xBattery);
+
+    tft.fillRect(0, 15, 128, 15, Display_Backround_Color);
+    tft.setCursor(0, 15);
+    tft.setTextColor(Display_Text_Color);
+    tft.print(buf);
 }
 
 void vSafePrintf(TickType_t xTicksToWait, const char *fmt, ...)
@@ -144,7 +270,6 @@ void vSafePrintf(TickType_t xTicksToWait, const char *fmt, ...)
 
     va_end(args);
 }
-
 void printIMUCalib(MPU9250 &mpu)
 {
     Serial.println("< calibration parameters >");
@@ -177,7 +302,6 @@ void printIMUCalib(MPU9250 &mpu)
     Serial.print(mpu.getMagScaleZ());
     Serial.println(");");
 }
-
 void BTSerialCallback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
     if(event == ESP_SPP_SRV_OPEN_EVT)
@@ -191,14 +315,15 @@ void setup()
 {
     xI2CMutex = xSemaphoreCreateMutex();
     xIMUIRQCounter = xSemaphoreCreateCounting(10, 0);
-    
+
     xUICommandQueue = xQueueCreate(32, sizeof(uint8_t));
     xSerialPortQueue = xQueueCreate(32, sizeof(char *));
     xTargetQueue = xQueueCreate(1, sizeof(point_direction_t));
     xIMUDataQueue = xQueueCreate(1, sizeof(point_direction_t));
     xServoQueue = xQueueCreate(1, sizeof(point_direction_t));
+    xBatteryQueue = xQueueCreate(1, sizeof(float));
 
-    xTaskCreatePinnedToCore(vDisplayTask, "Display Task", 4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(vDisplayTask, "Display Task", 8192, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(vServoTask, "Servo Task", 2048, NULL, 5, NULL, 1);
     xTaskCreatePinnedToCore(vIMUTask, "IMU Task", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(vBTSerialTask, "Bluetooth Task", 4096, NULL, 3, NULL, 1);
@@ -216,7 +341,6 @@ void vIMUISR()
     if(xHigherPriorityTaskWoken == pdTRUE)
         portYIELD_FROM_ISR();
 }
-
 void vLeftIRQ()
 {
     static portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
@@ -235,7 +359,6 @@ void vLeftIRQ()
     if(xHigherPriorityTaskWoken == pdTRUE)
         portYIELD_FROM_ISR();
 }
-
 void vRightIRQ()
 {
     static portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
@@ -254,7 +377,6 @@ void vRightIRQ()
     if(xHigherPriorityTaskWoken == pdTRUE)
         portYIELD_FROM_ISR();
 }
-
 void vCenterIRQ()
 {
     static portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
@@ -297,8 +419,10 @@ void vDisplayTask(void *pvParam)
 
     while(1)
     {
-        displayUpTime(tft);
-
+        static bool needUpdate = true;
+        static bool prevBTConnected = true;
+        static ui_menu_t menu = UI_MENU_MAIN;
+        static uint8_t sel = 0;
         uint8_t cmd;
 
         if(xQueueReceive(xUICommandQueue, &cmd, 0) == pdPASS)
@@ -306,24 +430,87 @@ void vDisplayTask(void *pvParam)
             switch(cmd)
             {
                 case UI_CMD_LEFT:
-                    vSafePrintf(portMAX_DELAY, "Display CMD LEFT\r\n");
+                    //vSafePrintf(portMAX_DELAY, "Display CMD LEFT\r\n");
+                    if(menu != UI_MENU_MAIN)
+                        break;
+
+                    sel = sel == 0 ? 0 : sel - 1;
+                    needUpdate = true;
                 break;
                 case UI_CMD_RIGHT:
-                    vSafePrintf(portMAX_DELAY, "Display CMD RIGHT\r\n");
+                    //vSafePrintf(portMAX_DELAY, "Display CMD RIGHT\r\n");
+                    if(menu != UI_MENU_MAIN)
+                        break;
+
+                    sel = sel == UI_MENU_COUNT - 1 ? UI_MENU_COUNT - 1 : sel + 1;
+                    needUpdate = true;
                 break;
                 case UI_CMD_CENTER:
-                    vSafePrintf(portMAX_DELAY, "Display CMD CENTER\r\n");
+                    //vSafePrintf(portMAX_DELAY, "Display CMD CENTER\r\n");
+                    if(menu != UI_MENU_MAIN)
+                        menu = UI_MENU_MAIN;
+                    else
+                        menu = (ui_menu_t)sel;
+
+                    needUpdate = true;
                 break;
                 default:
-                    vSafePrintf(portMAX_DELAY, "Display CMD UNKNOWN\r\n");
+                    //vSafePrintf(portMAX_DELAY, "Display CMD UNKNOWN\r\n");
                 break;
             }
         }
 
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+        if(prevBTConnected != BTConnected)
+        {
+            prevBTConnected = BTConnected;
+
+            tft.fillRect(0, 0, 128, 15, Display_Backround_Color);
+            tft.setCursor(0, 0);
+            tft.setTextColor(BTConnected ? Display_Color_Green : Display_Color_Red);
+            tft.print(BTConnected ? "BT CONN" : "BT DISCON");
+        }
+
+        if(menu != UI_MENU_MAIN)
+        {
+            static uint32_t prevTime = 0;
+
+            if(millis() - prevTime > 2000)
+            {
+                prevTime = millis();
+
+                needUpdate = true;
+            }
+        }
+
+        if(needUpdate)
+        {
+            tft.fillRect(0, 15, 128, 160 - 15, Display_Backround_Color);
+
+            switch (menu)
+            {
+                case UI_MENU_MAIN:
+                    tftMainMenu(tft, sel);
+                break;
+                case UI_MENU_BT_DATA:
+                    tftBTMenu(tft);
+                break;
+                case UI_MENU_IMU:
+                    tftIMUMenu(tft);
+                break;
+                case UI_MENU_CALIBRATION:
+                    tftCalibMenu(tft);
+                break;
+                case UI_MENU_BATTERY:
+                    tftBatMenu(tft);
+                break;
+            }
+
+            needUpdate = false;
+        }
+
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
-
 void vServoTask(void *pvParam)
 {
     Servo azimuth_servo;
@@ -373,7 +560,6 @@ void vServoTask(void *pvParam)
         */
     }
 }
-
 void vIMUTask(void *pvParam)
 {
     Wire.begin();
@@ -397,10 +583,10 @@ void vIMUTask(void *pvParam)
     //mpu.calibrateMag();
 
     //printIMUCalib(mpu);
-    mpu.setAccBias(-320.92, -4.72, 806.15);
-    mpu.setGyroBias(-202.33, 64.51, 219.67);
-    mpu.setMagBias(-1996.70, 2202.25, -1419.39);
-    mpu.setMagScale(0.83, 1.00, 1.27);
+    mpu.setAccBias(fIMUCal[0], fIMUCal[1], fIMUCal[2]);
+    mpu.setGyroBias(fIMUCal[3], fIMUCal[4], fIMUCal[5]);
+    mpu.setMagBias(fIMUCal[6], fIMUCal[7], fIMUCal[8]);
+    mpu.setMagScale(fIMUCal[9], fIMUCal[10], fIMUCal[11]);
 
     attachInterrupt(IMU_IRQ_PIN, vIMUISR, RISING);
 
@@ -437,7 +623,6 @@ void vIMUTask(void *pvParam)
         }
     }
 }
-
 void vBTSerialTask(void *pvParam)
 {
     BluetoothSerial BTSerial;
@@ -479,7 +664,6 @@ void vBTSerialTask(void *pvParam)
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }
-
 void vSerialTask(void *pvParam)
 {
     Serial.begin(115200);
@@ -498,18 +682,18 @@ void vSerialTask(void *pvParam)
         free(pcString);
     }
 }
-
 void vADCTask(void *pvParam)
 {
     while(1)
     {
-        int val = analogRead(BAT_ADC_PIN);
+        float xBattery = (float)analogRead(BAT_ADC_PIN) * (3.3 / 4095.0);
 
-        vSafePrintf(portMAX_DELAY, "ADC val: %d\r\n", val);
+        xQueueOverwrite(xBatteryQueue, &xBattery);
+
+        vSafePrintf(portMAX_DELAY, "Bat: %.2f V\r\n", xBattery);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
-
 void vProcessingTask(void *pvParam)
 {
     while(1)
@@ -526,11 +710,12 @@ void vProcessingTask(void *pvParam)
 
         xServoPosition.fAzimuth = xTargetPosition.fAzimuth - xCurrentPosition.fAzimuth;
         xServoPosition.fElevation = xTargetPosition.fElevation - xCurrentPosition.fElevation;
-        
+
         xQueueOverwrite(xServoQueue, &xServoPosition);
+
+        vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }
-
 void vStatsPrintTask(void *pvParam)
 {
     char buf[512] = {0};
