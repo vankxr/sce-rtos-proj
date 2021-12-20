@@ -18,7 +18,7 @@
 #define TFT_CS    2
 #define TFT_RST   33
 #define TFT_DC    4
-#define TFT_MOSI  23 
+#define TFT_MOSI  23
 #define TFT_SCLK  18
 #define TFT_LITE  32
 
