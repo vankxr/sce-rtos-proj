@@ -32,6 +32,7 @@
 #define BTN_LEFT_PIN   13
 #define BTN_RIGHT_PIN  14
 #define BTN_CENTER_PIN 15
+#define BTN_EMERG_PIN  17
 
 // Constants
 #define UI_CMD_LEFT     0
@@ -80,20 +81,22 @@ const char*     Display_Str_Main_Menu[UI_MENU_COUNT] =
 };
 
 const float fIMUCal[12] = {
-    -320.92, -4.72, 806.15,
-    -202.33, 64.51, 219.67,
-    -1996.70, 2202.25, -1419.39,
-    0.83, 1.00, 1.27
+    -304.38, -257.17, -87.30,
+    -1.61, -0.61, 1.99,
+    425.55, 336.24, 210.08,
+    0.76, 0.96, 1.54
 };
 volatile unsigned long ulIdleCycleCount = 0UL;
 SemaphoreHandle_t xI2CMutex;
 SemaphoreHandle_t xIMUIRQCounter;
+SemaphoreHandle_t xEmergFlag;
 QueueHandle_t xUICommandQueue;
 QueueHandle_t xSerialPortQueue;
 QueueHandle_t xTargetQueue;
 QueueHandle_t xIMUDataQueue;
 QueueHandle_t xServoQueue;
 QueueHandle_t xBatteryQueue;
+QueueSetHandle_t xServoQueueSet;
 
 bool BTConnected = false;
 
@@ -315,6 +318,7 @@ void setup()
 {
     xI2CMutex = xSemaphoreCreateMutex();
     xIMUIRQCounter = xSemaphoreCreateCounting(10, 0);
+    xEmergFlag = xSemaphoreCreateBinary();
 
     xUICommandQueue = xQueueCreate(32, sizeof(uint8_t));
     xSerialPortQueue = xQueueCreate(32, sizeof(char *));
@@ -322,6 +326,11 @@ void setup()
     xIMUDataQueue = xQueueCreate(1, sizeof(point_direction_t));
     xServoQueue = xQueueCreate(1, sizeof(point_direction_t));
     xBatteryQueue = xQueueCreate(1, sizeof(float));
+
+    xServoQueueSet = xQueueCreateSet(2);
+
+    xQueueAddToSet(xServoQueue, xServoQueueSet);
+    xQueueAddToSet(xEmergFlag, xServoQueueSet);
 
     xTaskCreatePinnedToCore(vDisplayTask, "Display Task", 8192, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(vServoTask, "Servo Task", 2048, NULL, 5, NULL, 1);
@@ -388,6 +397,23 @@ void vCenterIRQ()
     {
         uint8_t cmd = UI_CMD_CENTER;
         xQueueSendToBackFromISR(xUICommandQueue, (void *)&cmd, (BaseType_t *)&xHigherPriorityTaskWoken);
+
+        lastPress = now;
+    }
+
+    if(xHigherPriorityTaskWoken == pdTRUE)
+        portYIELD_FROM_ISR();
+}
+void vEmergIRQ()
+{
+    static portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+
+    static int lastPress = 0;
+    int now = millis();
+
+    if(now - lastPress > 500)
+    {
+        xSemaphoreGiveFromISR(xEmergFlag, (BaseType_t *)&xHigherPriorityTaskWoken);
 
         lastPress = now;
     }
@@ -521,25 +547,48 @@ void vServoTask(void *pvParam)
     azimuth_servo.attach(SERVO_AZ_PIN, 500, 2400);
     elevation_servo.attach(SERVO_EL_PIN, 500, 2400);
 
+    pinMode(BTN_EMERG_PIN, INPUT_PULLUP);
+    attachInterrupt(BTN_EMERG_PIN, vEmergIRQ, FALLING);
+
     while(1)
     {
-        point_direction_t xServoPosition;
+        QueueSetMemberHandle_t xActivatedMember;
 
-        if(xQueueReceive(xServoQueue, &xServoPosition, portMAX_DELAY) != pdPASS)
-            continue;
+        xActivatedMember = xQueueSelectFromSet(xServoQueueSet, portMAX_DELAY);
 
-        static int lastUpdate = 0;
-        int now = millis();
-
-        if(now - lastUpdate > 2000)
+        if(xActivatedMember == xServoQueue)
         {
-            vSafePrintf(portMAX_DELAY, "Servos: %.2f, %.2f\r\n", xServoPosition.fAzimuth, xServoPosition.fElevation);
+            point_direction_t xServoPosition;
 
-            lastUpdate = now;
+            if(xQueueReceive(xServoQueue, &xServoPosition, portMAX_DELAY) != pdPASS)
+                continue;
+
+            static int lastUpdate = 0;
+            int now = millis();
+
+            if(now - lastUpdate > 2000)
+            {
+                vSafePrintf(portMAX_DELAY, "Servos: %.2f, %.2f\r\n", xServoPosition.fAzimuth, xServoPosition.fElevation);
+
+                lastUpdate = now;
+            }
+
+            azimuth_servo.write(xServoPosition.fAzimuth);
+            elevation_servo.write(xServoPosition.fElevation);
         }
+        else if(xActivatedMember == xEmergFlag)
+        {
+            if(xSemaphoreTake(xEmergFlag, portMAX_DELAY) != pdPASS)
+                continue;
 
-        azimuth_servo.write(xServoPosition.fAzimuth);
-        elevation_servo.write(xServoPosition.fElevation);
+            azimuth_servo.detach();
+            elevation_servo.detach();
+
+            // Emergency state can only be reset by POR
+            // Delete this task since it is not doing anything useful
+            vSafePrintf(portMAX_DELAY, "Emergency mode activated! Please reboot the system to restore functionality\r\n");
+            vTaskDelete(NULL);
+        }
 
         /*
         for (int pos = 0; pos <= 180; pos += 1)
@@ -686,7 +735,7 @@ void vADCTask(void *pvParam)
 {
     while(1)
     {
-        float xBattery = (float)analogRead(BAT_ADC_PIN) * (3.3 / 4095.0);
+        float xBattery = (float)analogRead(BAT_ADC_PIN) * (3.3 / 4095.0) * 2.0;
 
         xQueueOverwrite(xBatteryQueue, &xBattery);
 
